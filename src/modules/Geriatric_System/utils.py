@@ -1,10 +1,5 @@
 """
 utils.py – Helper functions for the Geriatric System Module.
-Covers: Frailty Index calculation, Morse risk classification, MMSE severity.
-"""
-
-"""
-utils.py – Helper functions for the Geriatric System Module.
 Version: 1.1.0
 Last Updated: 2026-03-18
 Author: D
@@ -18,16 +13,18 @@ from datetime import datetime
 # 1.0  Frailty Index (Process 1 – DFD)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def calc_frailty_index(age: int, num_comorbidities: int, fall_history: bool, mmse_score: int) -> float:
+def calc_frailty_index(age: int, num_comorbidities: int,
+                       fall_history: bool, mmse_score: int,
+                       gds_score: int = 0, adl_score: int = 6) -> float:
     """
-    Simplified Frailty Index (0.0 – 1.0).
-    Based on 4 deficit components that mirror the ER + DFD data sources.
+    Frailty Index (0.0 – 1.0) — now uses 6 deficit components.
+    Added: GDS depression score + ADL dependency.
     """
     if any(v is None for v in [age, num_comorbidities, mmse_score]):
         return 0.0
-    
+
     deficits = 0
-    total = 4
+    total = 6
 
     if age >= 75:
         deficits += 1
@@ -36,6 +33,10 @@ def calc_frailty_index(age: int, num_comorbidities: int, fall_history: bool, mms
     if fall_history:
         deficits += 1
     if mmse_score <= 17:
+        deficits += 1
+    if gds_score >= 5:          # depression present
+        deficits += 1
+    if adl_score <= 3:          # significant ADL dependency
         deficits += 1
 
     return round(deficits / total, 2)
@@ -134,3 +135,52 @@ def count_comorbidities(patient_id: str) -> int:
     if coll is None:
         return 0
     return coll.count_documents({"patient_id": patient_id})
+
+    # ─────────────────────────────────────────────────────────────────────────────
+# 4.0  GDS – Geriatric Depression Scale (Process 4 – DFD)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def gds_severity(score: int) -> tuple[str, str]:
+    """
+    Returns (severity_label, hex_color) for GDS-15 total (0-15).
+    0-4 Normal | 5-8 Mild Depression | 9-11 Moderate | 12-15 Severe
+    """
+    if score <= 4:
+        return "Normal", "#2ecc71"
+    elif score <= 8:
+        return "Mild Depression", "#f39c12"
+    elif score <= 11:
+        return "Moderate Depression", "#e67e22"
+    else:
+        return "Severe Depression", "#e74c3c"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.0  ADL / IADL – Activities of Daily Living (Process 5 – DFD)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def adl_level(score: int, total: int) -> tuple[str, str]:
+    """
+    Returns (dependency_label, hex_color) for ADL score.
+    Percentage-based: ≥80% Independent | 50-79% Moderate | <50% Dependent
+    """
+    pct = (score / total * 100) if total > 0 else 0
+    if pct >= 80:
+        return "Independent", "#2ecc71"
+    elif pct >= 50:
+        return "Moderately Dependent", "#f39c12"
+    else:
+        return "Dependent", "#e74c3c"
+
+
+def iadl_level(score: int, total: int) -> tuple[str, str]:
+    """
+    Returns (dependency_label, hex_color) for IADL score.
+    Same thresholds as ADL.
+    """
+    pct = (score / total * 100) if total > 0 else 0
+    if pct >= 80:
+        return "Independent", "#2ecc71"
+    elif pct >= 50:
+        return "Moderately Dependent", "#f39c12"
+    else:
+        return "Dependent", "#e74c3c"

@@ -2,7 +2,6 @@
 import streamlit as st
 from components.sidebar import sidebar
 from components.charts import patient_line_chart, appointment_donut_chart
-import matplotlib.pyplot as plt
 
 # All categories and their modules
 CATEGORIES = {
@@ -145,10 +144,15 @@ def doctor_dashboard():
         "I - Analytics & Reporting"
     ])
 
-    # Only change view if a category is explicitly selected AND it's not "Dashboard"
-    if selected != "Dashboard" and selected in CATEGORIES and st.session_state.view == "main":
-        # Don't auto-navigate, let button clicks handle it
-        pass
+    # Handle sidebar selection
+    if selected != "Dashboard" and selected in CATEGORIES:
+        st.session_state.selected_category = selected
+        st.session_state.view = "category"
+        st.session_state.selected_module = None
+    elif selected == "Dashboard":
+        st.session_state.view = "main"
+        st.session_state.selected_category = None
+        st.session_state.selected_module = None
 
     # ROUTER
     if st.session_state.view == "category":
@@ -353,6 +357,17 @@ def show_category_view():
 
 def show_module_detail():
     code, name, desc, tables, records = st.session_state.selected_module
+    
+    if "Geriatric" in name:
+        from src.modules.Geriatric_System.geriatric_app import run_geriatric_module
+        run_geriatric_module()
+        
+        st.divider()
+        if st.button("⬅ Back to Categories"):
+            st.session_state.view = "category"
+            st.rerun()
+        return
+
     cat_key = st.session_state.selected_category
     
     # Breadcrumb

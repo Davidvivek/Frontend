@@ -359,6 +359,17 @@ def show_category_view():
 
 def show_module_detail():
     code, name, desc, tables, records = st.session_state.selected_module
+    
+    if "Geriatric" in name:
+        from src.modules.Geriatric_System.geriatric_app import run_geriatric_module
+        run_geriatric_module()
+        
+        st.divider()
+        if st.button("⬅ Back to Categories"):
+            st.session_state.view = "category"
+            st.rerun()
+        return
+
     cat_key = st.session_state.selected_category
     
     # Breadcrumb

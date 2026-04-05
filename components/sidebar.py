@@ -5,10 +5,13 @@ from streamlit_option_menu import option_menu
 def sidebar(menu_items):
     with st.sidebar:
         st.markdown("## 🏥 MediCare")
+        all_icons = ["house", "activity", "flask", "capsule", "building", "credit-card", "people", "shield", "truck", "bar-chart"]
+        # Ensure icon list matches menu item count
+        icons = all_icons[:len(menu_items)]
         selected = option_menu(
             "",
             menu_items,
-            icons=["activity", "flask", "capsule", "building", "credit-card", "people", "shield", "truck", "bar-chart"],
+            icons=icons,
             default_index=0
         )
 

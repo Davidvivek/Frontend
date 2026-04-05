@@ -12,7 +12,8 @@ import streamlit as st
 from database import get_collection, log_activity
 from utils import (
     calc_frailty_index, frailty_label,
-    morse_risk_level, mmse_severity,
+    morse_risk_level, mmse_severity, gds_severity,
+    adl_level, iadl_level,
     get_patient_list, get_latest_assessment,
     get_all_assessments, get_comorbidities, count_comorbidities
 )
@@ -473,48 +474,408 @@ def _tab_comorbidities(patient_id: str):
         st.markdown("**Additional Notes**")
         notes = st.text_area("Clinical notes (optional)", height=80, key="comorbid_notes")
 
+        st.markdown("---")
+
+        # ── LINK button with duplicate guard ────────────────────────────────
+        if st.button("🔗 Link Disease to Patient", use_container_width=True):
+            if disease_code == "ZZZ" and not disease_name:
+                st.warning("Please enter a disease name.")
+            else:
+                coll = get_collection("comorbidities")
+
+                # ── Duplicate check ──────────────────────────────────────────
+                already_exists = coll.find_one({
+                    "patient_id":   patient_id,
+                    "disease_code": disease_code
+                }) if coll is not None else None
+
+                if already_exists:
+                    st.warning(
+                        f"⚠️ **{disease_name}** ({disease_code}) is already linked to this patient. "
+                        f"It was added on {str(already_exists.get('diagnosis_date',''))[:10]}."
+                    )
+                else:
+                    doc = {
+                        "patient_id":     patient_id,
+                        "disease":        disease_name,
+                        "disease_code":   disease_code,
+                        "severity":       severity,
+                        "diagnosis_date": datetime.combine(diag_date, datetime.min.time()),
+                        "notes":          notes,
+                        "timestamp":      datetime.utcnow(),
+                    }
+                    coll.insert_one(doc)
+                    log_activity("Comorbidity_Linked", patient_id,
+                                 {"disease": disease_name, "severity": severity})
+                    st.success(f"✅ Linked **{disease_name}** ({disease_code}) to patient `{patient_id}`")
+                    st.rerun()
+
     with col2:
         st.markdown("**Current Comorbidities**")
         existing = get_comorbidities(patient_id)
         if existing:
-            df_existing = pd.DataFrame([
-                {
-                    "Disease":   e.get("disease", "—"),
-                    "Code":      e.get("disease_code", "—"),
-                    "Severity":  e.get("severity", "—"),
-                    "Diagnosed": str(e.get("diagnosis_date", "—"))[:10],
-                }
-                for e in existing
-            ])
-            st.dataframe(df_existing, use_container_width=True, hide_index=True)
+            for i, e in enumerate(existing):
+                with st.container():
+                    c1, c2 = st.columns([4, 1])
+                    with c1:
+                        st.markdown(f"**{e.get('disease', '—')}** `{e.get('disease_code', '—')}`")
+                        st.caption(
+                            f"Severity: {e.get('severity','—')} · "
+                            f"Diagnosed: {str(e.get('diagnosis_date','—'))[:10]}"
+                        )
+                    with c2:
+                        # ── DELETE button ────────────────────────────────────
+                        if st.button("🗑️", key=f"del_comorbid_{i}", help="Remove this disease"):
+                            coll = get_collection("comorbidities")
+                            if coll is not None:
+                                coll.delete_one({
+                                    "patient_id":   patient_id,
+                                    "disease_code": e.get("disease_code"),
+                                    "disease":      e.get("disease"),
+                                })
+                                log_activity("Comorbidity_Deleted", patient_id,
+                                             {"disease": e.get("disease")})
+                                st.success(f"Removed **{e.get('disease')}**")
+                                st.rerun()
+                    st.markdown("---")
+
             st.markdown(
-                f'<p style="color:#a8b2d8;font-size:0.85rem;">Total: <b style="color:#e94560;">{len(existing)}</b> condition(s) linked</p>',
+                f'<p style="color:#a8b2d8;font-size:0.85rem;">'
+                f'Total: <b style="color:#e94560;">{len(existing)}</b> condition(s) linked</p>',
                 unsafe_allow_html=True,
             )
         else:
             st.info("No comorbidities linked yet.")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PROCESS 4.0 – Geriatric Depression Scale (GDS-15)
+# ─────────────────────────────────────────────────────────────────────────────
+def _tab_gds(patient_id: str):
+    _section_header("😔", "Geriatric Depression Scale (GDS-15)",
+                    "15-item yes/no screening tool for depression in older adults")
+
+    st.markdown(
+        """
+        <div style="background:#1a1a2e;border-radius:10px;padding:12px 18px;margin-bottom:16px;">
+          <b style="color:#a8b2d8;">Instructions:</b>
+          <span style="color:#ddd;font-size:0.9rem;">
+          Ask the patient how they felt <b>over the past week</b>. Each question is answered Yes or No.
+          A score of 5 or more suggests depression and warrants follow-up.
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ── 15 GDS Questions ─────────────────────────────────────────────────────
+    GDS_QUESTIONS = [
+        ("Q1",  "Are you basically satisfied with your life?",                    "No"),
+        ("Q2",  "Have you dropped many of your activities and interests?",        "Yes"),
+        ("Q3",  "Do you feel that your life is empty?",                           "Yes"),
+        ("Q4",  "Do you often get bored?",                                        "Yes"),
+        ("Q5",  "Are you in good spirits most of the time?",                      "No"),
+        ("Q6",  "Are you afraid that something bad is going to happen to you?",   "Yes"),
+        ("Q7",  "Do you feel happy most of the time?",                            "No"),
+        ("Q8",  "Do you often feel helpless?",                                    "Yes"),
+        ("Q9",  "Do you prefer to stay at home, rather than going out?",          "Yes"),
+        ("Q10", "Do you feel you have more problems with memory than most?",      "Yes"),
+        ("Q11", "Do you think it is wonderful to be alive now?",                  "No"),
+        ("Q12", "Do you feel pretty worthless the way you are now?",              "Yes"),
+        ("Q13", "Do you feel full of energy?",                                    "No"),
+        ("Q14", "Do you feel that your situation is hopeless?",                   "Yes"),
+        ("Q15", "Do you think that most people are better off than you are?",     "Yes"),
+    ]
+
+    # ── Render questions in 2 columns ────────────────────────────────────────
+    answers = {}
+    col1, col2 = st.columns(2)
+
+    for idx, (qid, question, depressive_answer) in enumerate(GDS_QUESTIONS):
+        col = col1 if idx < 8 else col2
+        with col:
+            st.markdown(f"**{qid}.** {question}")
+            answer = st.radio(
+                qid,
+                ["Yes", "No"],
+                horizontal=True,
+                key=f"gds_{qid}",
+                label_visibility="collapsed"
+            )
+            answers[qid] = 1 if answer == depressive_answer else 0
+            st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
+
+    # ── Calculate total score ────────────────────────────────────────────────
+    total_gds = sum(answers.values())
+    severity_label, severity_color = gds_severity(total_gds)
+
+    # ── Score display ────────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        _metric_card("GDS Total Score", f"{total_gds} / 15", color="#0f3460")
+    with g2:
+        _metric_card("Depression Level", severity_label, color=severity_color[:7])
+    with g3:
+        _metric_card("Assessment Date", datetime.now().strftime("%d %b %Y"), color="#1a1a2e")
+
+    st.markdown(
+        f'<div style="text-align:center;margin:12px 0;">{_badge(severity_label, severity_color)}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Clinical interpretation ──────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    if total_gds <= 4:
+        st.success("✅ Score within normal range. No significant depressive symptoms detected.")
+    elif total_gds <= 8:
+        st.warning("⚠️ Mild depression indicated. Consider follow-up and monitoring.")
+    elif total_gds <= 11:
+        st.warning("⚠️ Moderate depression indicated. Referral to mental health professional recommended.")
+    else:
+        st.error("🚨 Severe depression indicated. Immediate psychiatric referral required.")
+
     st.markdown("---")
-    if st.button("🔗 Link Disease to Patient", use_container_width=True):
-        if disease_code == "ZZZ" and not disease_name:
-            st.warning("Please enter a disease name.")
-        else:
-            coll = get_collection("comorbidities")
+
+    # ── Save + History ───────────────────────────────────────────────────────
+    col_btn, col_hist = st.columns([1, 2])
+    with col_btn:
+        if st.button("💾 Save GDS Assessment", use_container_width=True):
+            coll = get_collection("assessments")
+            gds_id = f"{patient_id}_GDS_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
             doc = {
-                "patient_id":     patient_id,
-                "disease":        disease_name,
-                "disease_code":   disease_code,
-                "severity":       severity,
-                "diagnosis_date": datetime.combine(diag_date, datetime.min.time()),
-                "notes":          notes,
-                "timestamp":      datetime.utcnow(),
+                "patient_id":    patient_id,
+                "gds_id":        gds_id,
+                "type":          "GDS",
+                "score":         total_gds,
+                "gds_answers":   answers,
+                "date":          datetime.utcnow(),
             }
             coll.insert_one(doc)
-            log_activity("Comorbidity_Linked", patient_id, {"disease": disease_name, "severity": severity})
-            st.success(f"✅ Linked **{disease_name}** ({disease_code}) to patient `{patient_id}`")
+            log_activity("GDS_Assessment", patient_id,
+                         {"score": total_gds, "severity": severity_label})
+            st.success(f"✅ GDS Score ({total_gds}/15) saved! ID: `{gds_id}`")
             st.rerun()
 
+    with col_hist:
+        history = get_all_assessments(patient_id, "GDS")
+        if history:
+            df = pd.DataFrame(history)
+            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%d %b %Y %H:%M")
+            st.markdown("**GDS History**")
+            st.dataframe(
+                df.rename(columns={"score": "GDS Score", "date": "Date"}),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No GDS assessments recorded yet.")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PROCESS 4.5 – ADL / IADL Assessment
+# ─────────────────────────────────────────────────────────────────────────────
+def _tab_adl(patient_id: str):
+    _section_header("🏃", "ADL / IADL Assessment",
+                    "Activities of Daily Living · Instrumental Activities of Daily Living")
+
+    st.markdown(
+        """
+        <div style="background:#1a1a2e;border-radius:10px;padding:12px 18px;margin-bottom:16px;">
+          <b style="color:#a8b2d8;">Instructions:</b>
+          <span style="color:#ddd;font-size:0.9rem;">
+          Rate the patient's ability to perform each activity.
+          <b>ADL</b> covers basic self-care. <b>IADL</b> covers independent living skills.
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    adl_tab, iadl_tab = st.tabs(["🛁 Basic ADL (Katz Index)", "🏠 Instrumental IADL (Lawton)"])
+
+    # ── ADL Tab ──────────────────────────────────────────────────────────────
+    with adl_tab:
+        st.markdown("#### Katz Index of Independence in ADL")
+        st.caption("Score 1 = Independent · Score 0 = Dependent")
+
+        ADL_ITEMS = [
+            ("Bathing",    "Bathes self completely or needs help only for one part"),
+            ("Dressing",   "Gets clothes and dresses without help"),
+            ("Toileting",  "Goes to toilet, gets on/off, cleans self without help"),
+            ("Transferring","Moves in/out of bed or chair without help"),
+            ("Continence", "Exercises complete self-control over urination and defecation"),
+            ("Feeding",    "Gets food from plate into mouth without help"),
+        ]
+
+        adl_scores = {}
+        col1, col2 = st.columns(2)
+        for idx, (activity, description) in enumerate(ADL_ITEMS):
+            col = col1 if idx < 3 else col2
+            with col:
+                st.markdown(f"**{activity}**")
+                st.caption(description)
+                score = st.radio(
+                    activity,
+                    [("Independent (1)", 1), ("Dependent (0)", 0)],
+                    format_func=lambda x: x[0],
+                    key=f"adl_{activity}",
+                    label_visibility="collapsed"
+                )[1]
+                adl_scores[activity] = score
+                st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
+
+        total_adl = sum(adl_scores.values())
+        adl_label, adl_color = adl_level(total_adl, len(ADL_ITEMS))
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            _metric_card("ADL Score", f"{total_adl} / {len(ADL_ITEMS)}", color="#0f3460")
+        with a2:
+            _metric_card("Independence Level", adl_label, color=adl_color[:7])
+        with a3:
+            _metric_card("Assessment Date", datetime.now().strftime("%d %b %Y"), color="#1a1a2e")
+
+        st.markdown(
+            f'<div style="text-align:center;margin:12px 0;">{_badge(adl_label, adl_color)}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Clinical note
+        st.markdown("<br>", unsafe_allow_html=True)
+        if total_adl == 6:
+            st.success("✅ Fully independent in all basic activities of daily living.")
+        elif total_adl >= 4:
+            st.warning("⚠️ Mild dependency. Monitor and consider home support for affected tasks.")
+        elif total_adl >= 2:
+            st.warning("⚠️ Moderate dependency. Caregiver assistance recommended.")
+        else:
+            st.error("🚨 Severe dependency. Full-time care support required.")
+
+        st.markdown("---")
+        col_btn, col_hist = st.columns([1, 2])
+        with col_btn:
+            if st.button("💾 Save ADL Assessment", use_container_width=True):
+                coll = get_collection("assessments")
+                adl_id = f"{patient_id}_ADL_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                doc = {
+                    "patient_id":  patient_id,
+                    "adl_id":      adl_id,
+                    "type":        "ADL",
+                    "score":       total_adl,
+                    "adl_scores":  adl_scores,
+                    "date":        datetime.utcnow(),
+                }
+                coll.insert_one(doc)
+                log_activity("ADL_Assessment", patient_id,
+                             {"score": total_adl, "level": adl_label})
+                st.success(f"✅ ADL Score ({total_adl}/6) saved! ID: `{adl_id}`")
+                st.rerun()
+
+        with col_hist:
+            history = get_all_assessments(patient_id, "ADL")
+            if history:
+                df = pd.DataFrame(history)
+                df["date"] = pd.to_datetime(df["date"]).dt.strftime("%d %b %Y %H:%M")
+                st.markdown("**ADL History**")
+                st.dataframe(
+                    df.rename(columns={"score": "ADL Score", "date": "Date"}),
+                    use_container_width=True, hide_index=True
+                )
+            else:
+                st.info("No ADL assessments recorded yet.")
+
+    # ── IADL Tab ─────────────────────────────────────────────────────────────
+    with iadl_tab:
+        st.markdown("#### Lawton Instrumental ADL Scale")
+        st.caption("Score 1 = Independent · Score 0 = Dependent")
+
+        IADL_ITEMS = [
+            ("Telephone",      "Able to look up numbers and dial independently"),
+            ("Shopping",       "Takes care of all shopping needs independently"),
+            ("Food Prep",      "Plans, prepares and serves adequate meals independently"),
+            ("Housekeeping",   "Maintains house alone or with occasional help"),
+            ("Laundry",        "Does personal laundry completely"),
+            ("Transportation", "Travels independently on public transport or drives own car"),
+            ("Medication",     "Takes medication in correct dosage at correct time"),
+            ("Finances",       "Manages financial matters independently"),
+        ]
+
+        iadl_scores = {}
+        col1, col2 = st.columns(2)
+        for idx, (activity, description) in enumerate(IADL_ITEMS):
+            col = col1 if idx < 4 else col2
+            with col:
+                st.markdown(f"**{activity}**")
+                st.caption(description)
+                score = st.radio(
+                    activity,
+                    [("Independent (1)", 1), ("Dependent (0)", 0)],
+                    format_func=lambda x: x[0],
+                    key=f"iadl_{activity}",
+                    label_visibility="collapsed"
+                )[1]
+                iadl_scores[activity] = score
+                st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
+
+        total_iadl = sum(iadl_scores.values())
+        iadl_label, iadl_color = iadl_level(total_iadl, len(IADL_ITEMS))
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        i1, i2, i3 = st.columns(3)
+        with i1:
+            _metric_card("IADL Score", f"{total_iadl} / {len(IADL_ITEMS)}", color="#0f3460")
+        with i2:
+            _metric_card("Independence Level", iadl_label, color=iadl_color[:7])
+        with i3:
+            _metric_card("Assessment Date", datetime.now().strftime("%d %b %Y"), color="#1a1a2e")
+
+        st.markdown(
+            f'<div style="text-align:center;margin:12px 0;">{_badge(iadl_label, iadl_color)}</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if total_iadl == 8:
+            st.success("✅ Fully independent in all instrumental activities.")
+        elif total_iadl >= 5:
+            st.warning("⚠️ Mild dependency. Some community support may be beneficial.")
+        elif total_iadl >= 3:
+            st.warning("⚠️ Moderate dependency. Structured support services recommended.")
+        else:
+            st.error("🚨 Severe dependency. Patient likely unable to live independently.")
+
+        st.markdown("---")
+        col_btn, col_hist = st.columns([1, 2])
+        with col_btn:
+            if st.button("💾 Save IADL Assessment", use_container_width=True):
+                coll = get_collection("assessments")
+                iadl_id = f"{patient_id}_IADL_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                doc = {
+                    "patient_id":   patient_id,
+                    "iadl_id":      iadl_id,
+                    "type":         "IADL",
+                    "score":        total_iadl,
+                    "iadl_scores":  iadl_scores,
+                    "date":         datetime.utcnow(),
+                }
+                coll.insert_one(doc)
+                log_activity("IADL_Assessment", patient_id,
+                             {"score": total_iadl, "level": iadl_label})
+                st.success(f"✅ IADL Score ({total_iadl}/8) saved! ID: `{iadl_id}`")
+                st.rerun()
+
+        with col_hist:
+            history = get_all_assessments(patient_id, "IADL")
+            if history:
+                df = pd.DataFrame(history)
+                df["date"] = pd.to_datetime(df["date"]).dt.strftime("%d %b %Y %H:%M")
+                st.markdown("**IADL History**")
+                st.dataframe(
+                    df.rename(columns={"score": "IADL Score", "date": "Date"}),
+                    use_container_width=True, hide_index=True
+                )
+            else:
+                st.info("No IADL assessments recorded yet.")
 # ─────────────────────────────────────────────────────────────────────────────
 # PROCESS 5.0 – Alerts & Reports (read-only dashboard)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -897,9 +1258,11 @@ def run_geriatric_module():
         return
 
     # ── Main tabs (Processes 2–5) ────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "🚶 Fall Risk (Morse)",
         "🧠 Cognitive Exam (MMSE)",
+        "😔 Depression (GDS)",
+        "🏃 ADL / IADL",
         "🩺 Comorbidities",
         "🔔 Alerts & Reports",
         "🗂️ Data Explorer",
@@ -907,17 +1270,17 @@ def run_geriatric_module():
 
     with tab1:
         _tab_fall_risk(patient_id)
-
     with tab2:
         _tab_cognitive(patient_id)
-
     with tab3:
-        _tab_comorbidities(patient_id)
-
+        _tab_gds(patient_id)
     with tab4:
-        _tab_alerts(patient_id)
-
+        _tab_adl(patient_id)
     with tab5:
+        _tab_comorbidities(patient_id)
+    with tab6:
+        _tab_alerts(patient_id)
+    with tab7:
         _tab_data_tables()
 
 
